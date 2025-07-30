@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive WebGL WebRTC Player</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            overflow: hidden;
+            background-color: #111827;
+            color: #f3f4f6;
+        }
+        #scene-container {
+            cursor: pointer;
+        }
+        #info-panel {
+            position: absolute;
+            top: 1rem;
+            left: 1rem;
+            background-color: rgba(30, 41, 59, 0.7); /* Updated for glassmorphism */
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px); /* For Safari */
+            padding: 1rem;
+            border-radius: 0.5rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+            max-width: 320px;
+            z-index: 10;
+        }
+        #info-panel input, #info-panel button, #info-panel select {
+            border-radius: 0.375rem;
+        }
+        /* Custom styles for select to match the new theme */
+        #info-panel select {
+            background-color: rgb(51 65 85 / 0.8);
+            border: 1px solid rgb(71 85 105);
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Container for the Three.js scene -->
+    <div id="scene-container"></div>
+
+    <!-- UI Panel for adding streams -->
+    <div id="info-panel" class="text-gray-200">
+        <h1 class="text-xl font-bold mb-2">Interactive WHEP Player</h1>
+        <p class="text-sm mb-4 text-gray-400">Select a favorite or enter a URL. Click a stream to focus, or 'X' to close.</p>
+        
+        <div class="flex flex-col space-y-4">
+            <div>
+                <label for="favorites-select" class="text-sm font-medium text-gray-300">Favorites</label>
+                <select id="favorites-select" class="w-full px-3 py-2 mt-1 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                    <option value="" data-name="">Select a favorite...</option>
+                </select>
+            </div>
+             <div>
+                <label for="stream-url" class="text-sm font-medium text-gray-300">WHEP Endpoint URL</label>
+                <div class="relative mt-1">
+                     <div class="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3">
+                        <svg class="h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                            <path fill-rule="evenodd" d="M12.586 4.586a2 2 0 112.828 2.828l-3 3a2 2 0 01-2.828 0 1 1 0 00-1.414 1.414 4 4 0 005.656 0l3-3a4 4 0 00-5.656-5.656l-1.5 1.5a1 1 0 101.414 1.414l1.5-1.5zm-5 5a2 2 0 012.828 0 1 1 0 101.414-1.414 4 4 0 00-5.656 0l-3 3a4 4 0 105.656 5.656l1.5-1.5a1 1 0 10-1.414-1.414l-1.5 1.5a2 2 0 11-2.828-2.828l3-3z" clip-rule="evenodd" />
+                        </svg>
+                    </div>
+                    <input type="text" id="stream-url" placeholder="http://.../whep-endpoint" class="w-full pl-10 pr-3 py-2 text-white bg-slate-800/60 border border-slate-700 rounded-md focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                </div>
+            </div>
+            <button id="add-stream-btn" class="w-full bg-gradient-to-r from-indigo-500 to-purple-600 hover:from-indigo-600 hover:to-purple-700 text-white font-bold py-2 px-4 rounded-md transition-all duration-300 disabled:from-slate-500 disabled:to-slate-600 disabled:cursor-not-allowed">
+                Add Video Stream
+            </button>
+            <button id="add-all-btn" class="w-full bg-gradient-to-r from-teal-500 to-cyan-600 hover:from-teal-600 hover:to-cyan-700 text-white font-bold py-2 px-4 rounded-md transition-all duration-300 disabled:from-slate-500 disabled:to-slate-600 disabled:cursor-not-allowed">
+                Add All Favorites
+            </button>
+        </div>
+
+        <p id="status-message" class="text-xs text-green-400 mt-3 h-4"></p>
+    </div>
+
+    <!-- Three.js via importmap -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+        }
+    }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Shaders for Rounded Corners and Borders ---
+        const vertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        const fragmentShader = `
+            varying vec2 vUv;
+            uniform sampler2D uTexture;
+            uniform float uRadius;
+            uniform float uBorderThickness;
+            uniform float uAspect;
+            uniform vec3 uFocusColor;
+            uniform float uIsFocused;
+
+            // Signed Distance Function for a rounded box
+            float sdRoundedBox(vec2 p, vec2 b, float r) {
+                vec2 q = abs(p) - b + r;
+                return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+            }
+
+            void main() {
+                vec2 p = vUv - 0.5;
+                p.x *= uAspect;
+
+                // Use a smaller anti-aliasing range for a sharper, flatter edge
+                float edgeSoftness = 0.002;
+
+                float d = sdRoundedBox(p, vec2(uAspect * 0.5, 0.5) - uRadius, uRadius);
+                float alpha = 1.0 - smoothstep(-edgeSoftness, edgeSoftness, d);
+
+                float border_dist = d + uBorderThickness;
+                float border = smoothstep(-edgeSoftness, edgeSoftness, d) - smoothstep(-edgeSoftness, edgeSoftness, border_dist);
+                
+                vec3 borderColor = mix(vec3(0.0), uFocusColor, uIsFocused); // Black if not focused, color if focused
+                vec4 videoColor = texture2D(uTexture, vUv);
+                vec4 finalColor = mix(videoColor, vec4(borderColor, 1.0), border);
+                
+                gl_FragColor = vec4(finalColor.rgb, finalColor.a * alpha);
+
+                if (gl_FragColor.a < 0.01) discard;
+            }
+        `;
+
+        let scene, camera, renderer, interactiveGroup;
+        const videoObjects = [];
+        let focusedObject = null;
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        const sceneContainer = document.getElementById('scene-container');
+        const addStreamBtn = document.getElementById('add-stream-btn');
+        const addAllBtn = document.getElementById('add-all-btn');
+        const streamUrlInput = document.getElementById('stream-url');
+        const statusMessage = document.getElementById('status-message');
+        const favoritesSelect = document.getElementById('favorites-select');
+
+        const favoriteStreams = [
+            {"name": "day", "url":"http://dev-server-mediaserver:8081/raycam-dev-1-main/whep"},
+            {"name": "thermal", "url":"http://dev-server-mediaserver:8081/raycam-dev-1-thermal/whep"},
+            {"name": "sim", "url":"http://dev-server-mediaserver:8081/simray-crd-base-raysim-1-main/whep"}
+        ];
+        
+        function createCloseButtonTexture() {
+            const canvas = document.createElement('canvas');
+            const size = 64;
+            canvas.width = size;
+            canvas.height = size;
+            const context = canvas.getContext('2d');
+            
+            context.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            context.beginPath();
+            context.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+            context.fill();
+
+            context.strokeStyle = 'white';
+            context.lineWidth = 6;
+            context.lineCap = 'round';
+            context.beginPath();
+            context.moveTo(size * 0.25, size * 0.25);
+            context.lineTo(size * 0.75, size * 0.75);
+            context.moveTo(size * 0.75, size * 0.25);
+            context.lineTo(size * 0.25, size * 0.75);
+            context.stroke();
+            
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.minFilter = THREE.LinearFilter;
+            return texture;
+        }
+
+        function createNameLabelTexture(text) {
+             const canvas = document.createElement('canvas');
+             const context = canvas.getContext('2d');
+             const fontSize = 48;
+             context.font = `${fontSize}px Inter`;
+             const textWidth = context.measureText(text).width;
+             
+             canvas.width = textWidth + 20;
+             canvas.height = fontSize + 20;
+
+             context.font = `${fontSize}px Inter`;
+             context.fillStyle = 'rgba(0, 0, 0, 0.5)';
+             context.fillRect(0, 0, canvas.width, canvas.height);
+             
+             context.fillStyle = 'white';
+             context.textAlign = 'center';
+             context.textBaseline = 'middle';
+             context.fillText(text, canvas.width / 2, canvas.height / 2);
+             
+             return new THREE.CanvasTexture(canvas);
+        }
+
+        function createPlaceholderTexture(text) {
+             const canvas = document.createElement('canvas');
+             const context = canvas.getContext('2d');
+             const width = 512;
+             const height = 288; // 16:9 aspect ratio
+             canvas.width = width;
+             canvas.height = height;
+
+             const cornerRadius = 25;
+
+             context.fillStyle = 'rgba(30, 41, 59, 0.7)'; // slate-800 with 70% opacity
+             context.beginPath();
+             context.moveTo(cornerRadius, 0);
+             context.lineTo(width - cornerRadius, 0);
+             context.arcTo(width, 0, width, cornerRadius, cornerRadius);
+             context.lineTo(width, height - cornerRadius);
+             context.arcTo(width, height, width - cornerRadius, height, cornerRadius);
+             context.lineTo(cornerRadius, height);
+             context.arcTo(0, height, 0, height - cornerRadius, cornerRadius);
+             context.lineTo(0, cornerRadius);
+             context.arcTo(0, 0, cornerRadius, 0, cornerRadius);
+             context.closePath();
+             context.fill();
+
+             const fontSize = 32;
+             context.font = `bold ${fontSize}px Inter`;
+             context.fillStyle = '#94a3b8'; // slate-400
+             context.textAlign = 'center';
+             context.textBaseline = 'middle';
+             context.fillText(text, width / 2, height / 2);
+             
+             return new THREE.CanvasTexture(canvas);
+        }
+
+
+        const closeButtonTexture = createCloseButtonTexture();
+        const loadingTexture = createPlaceholderTexture("Loading...");
+
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a0a);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            sceneContainer.appendChild(renderer.domElement);
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+            
+            interactiveGroup = new THREE.Group();
+            scene.add(interactiveGroup);
+            
+            const gridHelper = new THREE.GridHelper(100, 100, 0x444444, 0x222222);
+            gridHelper.rotation.x = Math.PI / 2;
+            gridHelper.position.z = -1;
+            scene.add(gridHelper);
+            
+            favoriteStreams.forEach(fav => {
+                const option = document.createElement('option');
+                option.value = fav.url;
+                option.dataset.name = fav.name;
+                option.textContent = fav.name;
+                favoritesSelect.appendChild(option);
+            });
+
+            window.addEventListener('resize', onWindowResize, false);
+            renderer.domElement.addEventListener('click', handleCanvasClick, false);
+            addStreamBtn.addEventListener('click', handleAddSingleStream);
+            addAllBtn.addEventListener('click', handleAddAllStreams);
+            favoritesSelect.addEventListener('change', (event) => {
+                streamUrlInput.value = event.target.value;
+            });
+
+            animate();
+            updateStatus("Ready. Enter a WHEP URL.", "green");
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            videoObjects.forEach(vidObj => {
+                vidObj.mesh.position.lerp(vidObj.targetPosition, 0.2);
+                vidObj.mesh.scale.lerp(vidObj.targetScale, 0.2);
+            });
+            
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            updateLayout(); 
+        }
+
+        async function handleAddSingleStream() {
+            const url = streamUrlInput.value;
+            if (!url) {
+                updateStatus("Please enter a WHEP URL.", "red"); return;
+            }
+            const selectedOption = favoritesSelect.options[favoritesSelect.selectedIndex];
+            const name = selectedOption.dataset.name || url.split('/').slice(-2).join('/');
+            
+            // REMOVED: Duplicate Prevention Logic
+            
+            await connectStream(url, name);
+        }
+
+        async function handleAddAllStreams() {
+            addStreamBtn.disabled = true;
+            addAllBtn.disabled = true;
+
+            for (const fav of favoriteStreams) {
+                // REMOVED: Duplicate Prevention Logic
+                await connectStream(fav.url, fav.name);
+                // Add a small delay between connection attempts
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+
+            addStreamBtn.disabled = false;
+            addAllBtn.disabled = false;
+        }
+
+
+        async function connectStream(url, name) {
+            updateStatus(`Connecting to ${name}...`, "yellow");
+            try {
+                const peerConnection = new RTCPeerConnection();
+                const remoteStream = new MediaStream();
+                peerConnection.ontrack = (event) => remoteStream.addTrack(event.track);
+                peerConnection.addTransceiver('video', { direction: 'recvonly' });
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: peerConnection.localDescription.sdp });
+                if (!response.ok || response.status !== 201) throw new Error(`Server responded with ${response.status}`);
+                const answerSdp = await response.text();
+                await peerConnection.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+                createVideoMesh(remoteStream, peerConnection, name);
+            } catch (err) {
+                console.error(`Failed to connect to ${name}:`, err);
+                updateStatus(`Error connecting to ${name}: ${err.message}`, "red");
+            }
+        }
+
+        function createVideoMesh(stream, peerConnection, name) {
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.muted = true;
+            video.playsInline = true;
+            video.play().catch(e => console.error("Video play failed:", e));
+
+            const tempAspectRatio = 16 / 9;
+            const geometry = new THREE.PlaneGeometry(1, 1); 
+            const material = new THREE.MeshBasicMaterial({ map: loadingTexture, transparent: true, side: THREE.DoubleSide });
+            const mesh = new THREE.Mesh(geometry, material);
+
+            const videoObject = { mesh, video, name, stream, peerConnection, geometry, material, texture: null, closeButton: null, nameLabel: null, targetPosition: new THREE.Vector3(), targetScale: new THREE.Vector3(1, 1, 1), aspectRatio: tempAspectRatio };
+            mesh.userData.videoObject = videoObject; 
+
+            // Add Close Button
+            const buttonSize = 0.05;
+            const closeButtonGeometry = new THREE.PlaneGeometry(buttonSize, buttonSize);
+            const closeButtonMaterial = new THREE.MeshBasicMaterial({ map: closeButtonTexture, transparent: true, side: THREE.DoubleSide });
+            const closeButtonMesh = new THREE.Mesh(closeButtonGeometry, closeButtonMaterial);
+            closeButtonMesh.userData.isCloseButton = true;
+            closeButtonMesh.userData.parentVideoObject = videoObject;
+            videoObject.closeButton = closeButtonMesh;
+            mesh.add(closeButtonMesh);
+
+            // Add Name Label
+            const nameTexture = createNameLabelTexture(name);
+            const labelAspect = nameTexture.image.width / nameTexture.image.height;
+            const labelHeight = 0.033;
+            const labelGeometry = new THREE.PlaneGeometry(labelHeight * labelAspect, labelHeight);
+            const labelMaterial = new THREE.MeshBasicMaterial({ map: nameTexture, transparent: true });
+            const nameLabelMesh = new THREE.Mesh(labelGeometry, labelMaterial);
+            videoObject.nameLabel = nameLabelMesh;
+            mesh.add(nameLabelMesh);
+            
+            videoObjects.push(videoObject);
+            interactiveGroup.add(mesh);
+
+            video.addEventListener('loadedmetadata', () => {
+                const texture = new THREE.VideoTexture(video);
+                texture.minFilter = THREE.LinearFilter;
+                texture.magFilter = THREE.LinearFilter;
+                texture.format = THREE.RGBAFormat;
+
+                const aspectRatio = video.videoWidth / video.videoHeight || 16/9;
+                videoObject.aspectRatio = aspectRatio;
+
+                videoObject.material.map?.dispose();
+                videoObject.material.dispose();
+
+                videoObject.material = new THREE.ShaderMaterial({
+                    vertexShader,
+                    fragmentShader,
+                    uniforms: {
+                        uTexture: { value: texture },
+                        uRadius: { value: 0.05 },
+                        uBorderThickness: { value: 0.005 },
+                        uAspect: { value: aspectRatio },
+                        uIsFocused: { value: 0.0 },
+                        uFocusColor: { value: new THREE.Color(0x4f46e5) } // Indigo
+                    },
+                    transparent: true,
+                    side: THREE.DoubleSide
+                });
+                mesh.material = videoObject.material;
+                videoObject.texture = texture;
+                
+                updateLayout();
+                updateStatus(`Stream ${name} added.`, "green");
+            });
+
+            updateLayout();
+        }
+        
+        function handleCanvasClick(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(interactiveGroup.children, true);
+
+            if (intersects.length > 0) {
+                const clickedMesh = intersects[0].object;
+                if (clickedMesh.userData.isCloseButton) {
+                    removeStream(clickedMesh.userData.parentVideoObject);
+                    return;
+                } 
+                if (clickedMesh.userData.videoObject) {
+                    const clickedObject = clickedMesh.userData.videoObject;
+                    focusedObject = (focusedObject === clickedObject) ? null : clickedObject;
+                }
+            } else {
+                focusedObject = null;
+            }
+            updateLayout();
+        }
+
+        function updateLayout() {
+            const count = videoObjects.length;
+            if (count === 0) return;
+
+            const vFOV = THREE.MathUtils.degToRad(camera.fov);
+            const height = 2 * Math.tan(vFOV / 2) * camera.position.z;
+            const width = height * camera.aspect;
+
+            videoObjects.forEach(vidObj => {
+                if (vidObj.material.uniforms) {
+                    vidObj.material.uniforms.uIsFocused.value = (vidObj === focusedObject) ? 1.0 : 0.0;
+                }
+
+                const buttonSize = vidObj.closeButton.geometry.parameters.width;
+                vidObj.closeButton.position.set(0.5 - buttonSize * 0.5, 0.5 - buttonSize * 0.5, 0.01);
+
+                const labelWidth = vidObj.nameLabel.geometry.parameters.width;
+                const labelHeight = vidObj.nameLabel.geometry.parameters.height;
+                vidObj.nameLabel.position.set(-0.5 + labelWidth * 0.5, -0.5 + labelHeight * 0.5, 0.01);
+            });
+
+            if (focusedObject && count > 1) {
+                const main = focusedObject;
+                const others = videoObjects.filter(obj => obj !== main);
+                const mainHeight = height * 0.8;
+                const mainWidth = width * 0.7; 
+                const mainScaleY = mainHeight;
+                const mainScaleX = mainHeight * main.aspectRatio;
+                main.targetScale.set(Math.min(mainScaleX, mainWidth), mainScaleY, 1);
+                main.targetPosition.set(-width * 0.15, 0, 0);
+
+                const thumbAreaWidth = width * 0.3;
+                const thumbHeight = height / others.length;
+                const thumbX = width * 0.35;
+                others.forEach((vidObj, i) => {
+                    const thumbScaleY = thumbHeight * 0.9;
+                    const thumbScaleX = thumbScaleY * vidObj.aspectRatio;
+                    vidObj.targetScale.set(Math.min(thumbScaleX, thumbAreaWidth * 0.9), thumbScaleY, 1);
+                    const thumbY = (height / 2) - (thumbHeight * (i + 0.5));
+                    vidObj.targetPosition.set(thumbX, thumbY, 0);
+                });
+            } else {
+                const grid = { cols: Math.ceil(Math.sqrt(count)), rows: Math.ceil(count / Math.ceil(Math.sqrt(count))) };
+                const tileWidth = width / grid.cols;
+                const tileHeight = height / grid.rows;
+                
+                let itemIndex = 0;
+                for (let r = 0; r < grid.rows; r++) {
+                    const itemsInThisRow = Math.min(grid.cols, count - (r * grid.cols));
+                    for (let c = 0; c < itemsInThisRow; c++) {
+                        if (itemIndex >= count) break;
+                        const vidObj = videoObjects[itemIndex];
+                        const rowOffsetX = ((itemsInThisRow - 1) / 2) * tileWidth;
+                        const x = (c * tileWidth) - rowOffsetX;
+                        const gridOffsetY = ((grid.rows - 1) / 2) * tileHeight;
+                        const y = gridOffsetY - (r * tileHeight);
+                        const scaleY = tileHeight * 0.95;
+                        const scaleX = scaleY * vidObj.aspectRatio;
+                        vidObj.targetScale.set(Math.min(scaleX, tileWidth * 0.95), scaleY, 1);
+                        vidObj.targetPosition.set(x, y, 0);
+                        itemIndex++;
+                    }
+                }
+            }
+        }
+
+        function removeStream(objectToRemove) {
+            if (!objectToRemove) return;
+            const index = videoObjects.indexOf(objectToRemove);
+            if (index === -1) return;
+            videoObjects.splice(index, 1);
+            if (focusedObject === objectToRemove) {
+                focusedObject = null;
+            }
+            if (objectToRemove.peerConnection) objectToRemove.peerConnection.close();
+            objectToRemove.stream.getTracks().forEach(track => track.stop());
+            objectToRemove.video.srcObject = null;
+            objectToRemove.mesh.traverse(child => {
+                if (child.isMesh) {
+                    child.geometry.dispose();
+                    if(child.material.map) child.material.map.dispose();
+                    child.material.dispose();
+                }
+            });
+            if (objectToRemove.texture) objectToRemove.texture.dispose();
+            interactiveGroup.remove(objectToRemove.mesh);
+            updateLayout();
+            updateStatus(`Stream removed. ${videoObjects.length} remaining.`, "green");
+        }
+        
+        function updateStatus(message, color) {
+            statusMessage.textContent = message;
+            statusMessage.classList.remove('text-green-400', 'text-yellow-400', 'text-red-400');
+            if (color === 'green') statusMessage.classList.add('text-green-400');
+            else if (color === 'yellow') statusMessage.classList.add('text-yellow-400');
+            else if (color === 'red') statusMessage.classList.add('text-red-400');
+        }
+
+        init();
+    </script>
+</body>
+</html>
+
