@@ -76,6 +76,20 @@
             <button id="add-all-btn" class="w-full bg-gradient-to-r from-teal-500 to-cyan-600 hover:from-teal-600 hover:to-cyan-700 text-white font-bold py-2 px-4 rounded-md transition-all duration-300 disabled:from-slate-500 disabled:to-slate-600 disabled:cursor-not-allowed">
                 Add All Favorites
             </button>
+            
+            <div class="flex items-center space-x-2 mt-4">
+                <input type="checkbox" id="webcam-checkbox" class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2">
+                <label for="webcam-checkbox" class="text-sm font-medium text-gray-300">Allow Webcam</label>
+            </div>
+
+            <div id="webcam-select-container" class="hidden">
+                 <label for="webcam-select" class="text-sm font-medium text-gray-300 block mb-1">Select Camera</label>
+                 <select id="webcam-select" class="w-full px-3 py-2 text-white focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500">
+                 </select>
+                 <button id="start-webcam-btn" class="w-full mt-2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md transition-all duration-300">
+                    Start Webcam
+                 </button>
+            </div>
         </div>
 
         <p id="status-message" class="text-xs text-green-400 mt-3 h-4"></p>
@@ -153,6 +167,10 @@
         const streamUrlInput = document.getElementById('stream-url');
         const statusMessage = document.getElementById('status-message');
         const favoritesSelect = document.getElementById('favorites-select');
+        const webcamCheckbox = document.getElementById('webcam-checkbox');
+        const webcamSelectContainer = document.getElementById('webcam-select-container');
+        const webcamSelect = document.getElementById('webcam-select');
+        const startWebcamBtn = document.getElementById('start-webcam-btn');
 
         const favoriteStreams = [
             {"name": "day", "url":"http://dev-server-mediaserver:8081/raycam-dev-1-main/whep"},
@@ -283,6 +301,8 @@
             renderer.domElement.addEventListener('click', handleCanvasClick, false);
             addStreamBtn.addEventListener('click', handleAddSingleStream);
             addAllBtn.addEventListener('click', handleAddAllStreams);
+            webcamCheckbox.addEventListener('change', handleWebcamCheckboxChange);
+            startWebcamBtn.addEventListener('click', handleStartWebcamStream);
             favoritesSelect.addEventListener('change', (event) => {
                 streamUrlInput.value = event.target.value;
             });
@@ -337,6 +357,194 @@
             addAllBtn.disabled = false;
         }
 
+        async function handleWebcamCheckboxChange() {
+            if (webcamCheckbox.checked) {
+                await populateWebcamDevices();
+                webcamSelectContainer.classList.remove('hidden');
+                updateStatus(`Click 'Start Webcam' to use your webcam.`, "yellow");
+            } else {
+                webcamSelectContainer.classList.add('hidden');
+                webcamSelect.innerHTML = ''; // Clear camera options
+                updateStatus("Webcam access disabled.", "yellow");
+            }
+        }
+
+        async function populateWebcamDevices() {
+            try {
+                if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+                    updateStatus("Webcam access not supported by this browser.", "red");
+                    return;
+                }
+                
+                updateStatus("Requesting camera permissions...", "yellow");
+                
+                // First, try to get a stream to trigger permissions
+                let tempStream;
+                try {
+                    tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    console.log("Got temporary stream:", tempStream);
+                } catch (err) {
+                    updateStatus("Permission needed to list webcams. Please allow and try again.", "red");
+                    console.error("Webcam permission denied:", err);
+                    return;
+                }
+
+                // Wait a bit longer to ensure devices are properly enumerated with labels
+                await new Promise(resolve => setTimeout(resolve, 500));
+                
+                updateStatus("Enumerating devices...", "yellow");
+                
+                // Now enumerate devices while stream is still active
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                console.log("All devices:", devices);
+                
+                // Stop the temporary stream after enumeration
+                tempStream.getTracks().forEach(track => track.stop());
+
+                const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                console.log("Video devices:", videoDevices);
+                
+                webcamSelect.innerHTML = '';
+                if (videoDevices.length === 0) {
+                    updateStatus("No webcams found.", "red");
+                    return;
+                }
+
+                // If we have multiple cameras, try to get more specific names
+                const cameraNames = [];
+                
+                // Try to get actual camera names by testing each device
+                for (let i = 0; i < videoDevices.length; i++) {
+                    const device = videoDevices[i];
+                    let cameraName = device.label;
+                    
+                    // If no label is provided, try to get a better name by testing the device
+                    if (!cameraName || cameraName === '') {
+                        try {
+                            // Try to get a stream from this specific device to see if we can get more info
+                            const testStream = await navigator.mediaDevices.getUserMedia({
+                                video: { deviceId: { exact: device.deviceId } }
+                            });
+                            
+                            // Get video track info
+                            const videoTrack = testStream.getVideoTracks()[0];
+                            if (videoTrack) {
+                                const capabilities = videoTrack.getCapabilities();
+                                const settings = videoTrack.getSettings();
+                                
+                                // Try to create a descriptive name based on capabilities
+                                if (capabilities.width && capabilities.height) {
+                                    const maxRes = capabilities.width.max + 'x' + capabilities.height.max;
+                                    cameraName = `Camera ${i + 1} (${maxRes})`;
+                                } else {
+                                    cameraName = `Camera ${i + 1}`;
+                                }
+                                
+                                console.log(`Device ${i} capabilities:`, capabilities);
+                                console.log(`Device ${i} settings:`, settings);
+                            } else {
+                                cameraName = `Camera ${i + 1}`;
+                            }
+                            
+                            // Stop the test stream
+                            testStream.getTracks().forEach(track => track.stop());
+                            
+                        } catch (err) {
+                            console.log(`Could not test device ${i}:`, err);
+                            cameraName = `Camera ${i + 1}`;
+                        }
+                    }
+                    
+                    cameraNames.push(cameraName);
+                }
+
+                videoDevices.forEach((device, index) => {
+                    console.log(`Device ${index}:`, device);
+                    console.log(`Device ${index} label:`, device.label);
+                    console.log(`Device ${index} deviceId:`, device.deviceId);
+                    
+                    // Only create option if device has a valid deviceId
+                    if (device.deviceId && device.deviceId.trim() !== '') {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.textContent = cameraNames[index];
+                        webcamSelect.appendChild(option);
+                        console.log(`Added option for device ${index} with deviceId:`, device.deviceId);
+                    } else {
+                        // Fallback: create option with index as identifier if deviceId is empty
+                        const option = document.createElement('option');
+                        option.value = `device_${index}`; // Use index as fallback identifier
+                        option.textContent = cameraNames[index];
+                        option.dataset.deviceIndex = index; // Store the device index for later use
+                        webcamSelect.appendChild(option);
+                        console.log(`Added fallback option for device ${index} with index identifier`);
+                    }
+                });
+
+                updateStatus(`Found ${videoDevices.length} camera(s). Select one and click 'Start Webcam'.`, "yellow");
+
+            } catch (err) {
+                console.error("Error enumerating devices:", err);
+                updateStatus("Error accessing webcams. Ensure permissions are granted.", "red");
+            }
+        }
+
+        async function handleStartWebcamStream() {
+            const deviceId = webcamSelect.value;
+            const selectedOption = webcamSelect.options[webcamSelect.selectedIndex];
+            const name = selectedOption.textContent;
+            
+            console.log("Selected deviceId:", deviceId);
+            console.log("Selected name:", name);
+            console.log("Selected option:", selectedOption);
+            console.log("deviceId type:", typeof deviceId);
+            console.log("deviceId length:", deviceId ? deviceId.length : 0);
+            console.log("deviceId === '':", deviceId === '');
+            console.log("!deviceId:", !deviceId);
+
+            if (!deviceId || deviceId === '') {
+                updateStatus("No camera selected.", "red");
+                return;
+            }
+
+            await startLocalStream(deviceId, name);
+        }
+
+        async function startLocalStream(deviceId, name) {
+            updateStatus(`Starting ${name}...`, "yellow");
+            try {
+                let constraints;
+                
+                // Check if this is a fallback device (using index instead of deviceId)
+                if (deviceId.startsWith('device_')) {
+                    // Use fallback approach - get all devices and use the index
+                    const deviceIndex = parseInt(deviceId.replace('device_', ''));
+                    const devices = await navigator.mediaDevices.enumerateDevices();
+                    const videoDevices = devices.filter(device => device.kind === 'videoinput');
+                    
+                    if (deviceIndex < videoDevices.length) {
+                        const device = videoDevices[deviceIndex];
+                        if (device.deviceId && device.deviceId.trim() !== '') {
+                            constraints = { video: { deviceId: { exact: device.deviceId } } };
+                        } else {
+                            // If still no deviceId, try with just video constraints
+                            constraints = { video: true };
+                        }
+                    } else {
+                        throw new Error(`Device index ${deviceIndex} not found`);
+                    }
+                } else {
+                    // Normal case - use the deviceId
+                    constraints = { video: { deviceId: { exact: deviceId } } };
+                }
+                
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                createVideoMesh(stream, null, name, deviceId);
+            } catch (err) {
+                console.error(`Failed to get local stream for ${name}:`, err);
+                updateStatus(`Error starting ${name}: ${err.message}`, "red");
+            }
+        }
 
         async function connectStream(url, name) {
             updateStatus(`Connecting to ${name}...`, "yellow");
@@ -358,7 +566,7 @@
             }
         }
 
-        function createVideoMesh(stream, peerConnection, name) {
+        function createVideoMesh(stream, peerConnection, name, deviceId = null) {
             const video = document.createElement('video');
             video.srcObject = stream;
             video.muted = true;
@@ -370,7 +578,7 @@
             const material = new THREE.MeshBasicMaterial({ map: loadingTexture, transparent: true, side: THREE.DoubleSide });
             const mesh = new THREE.Mesh(geometry, material);
 
-            const videoObject = { mesh, video, name, stream, peerConnection, geometry, material, texture: null, closeButton: null, nameLabel: null, targetPosition: new THREE.Vector3(), targetScale: new THREE.Vector3(1, 1, 1), aspectRatio: tempAspectRatio };
+            const videoObject = { mesh, video, name, stream, peerConnection, deviceId, geometry, material, texture: null, closeButton: null, nameLabel: null, targetPosition: new THREE.Vector3(), targetScale: new THREE.Vector3(1, 1, 1), aspectRatio: tempAspectRatio };
             mesh.userData.videoObject = videoObject; 
 
             // Add Close Button
